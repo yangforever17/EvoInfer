@@ -64,10 +64,13 @@ codex_bin = "codex"
 codex_model = ""          # empty: the CLI's default model
 claude_bin = "claude"
 claude_model = ""
+dsh_bin = "dsh"                  # DeepSeek Harness: npm i -g @deepseek-ai/dsh (Node >= 24.9)
+dsh_model = "deepseek-v4-pro"    # model of the built-in dsh policy
 ```
 
-`--agent codex|claude` picks the CLI with its own login. A *policy* (`--policy NAME`) is an agent CLI plus a model.
-Policies `codex` and `claude` are built in. You can add more, e.g. Claude Code against an Anthropic-compatible gateway
+`--agent codex|claude|dsh` picks the CLI. Codex and Claude Code use their own login; DeepSeek Harness uses DeepSeek's
+official API with the key in `$DEEPSEEK_API_KEY`. A *policy* (`--policy NAME`) is an agent CLI plus a model. Policies
+`codex`, `claude` and `dsh` are built in. You can add more, e.g. Claude Code against an Anthropic-compatible gateway
 that serves another model:
 
 ```toml
@@ -84,7 +87,24 @@ export QWEN_ANTHROPIC_BASE=https://... QWEN_API_KEY=...
 python3 orchestrator.py --lineage pq --policy qwen evolve --gpus 0,1
 ```
 
-Keys are only read from the environment and passed to the agent CLI; they are never written to records or logs.
+or DeepSeek Harness against any endpoint:
+
+```toml
+[policies.dsh-qwen]
+cli = "dsh"
+api = "openai"                   # OpenAI-compatible chat completions; "deepseek" (default): DeepSeek's Messages API
+model = "qwen3.8-max"
+base_url_env = "QWEN_OPENAI_BASE"   # e.g. https://host/v1; or base_url = "..." (a URL is not a secret)
+api_key_env = "QWEN_API_KEY"
+context_window = 262144          # api = "openai" only; defaults 131072 / 32768
+max_tokens = 32768
+# proxy_env = "MY_HTTPS_PROXY"   # optional: variable holding an HTTPS proxy for the model requests
+```
+
+Keys are only read from the environment; they are never written to records or logs. Claude Code gets its gateway key
+in its environment. DeepSeek Harness never sees a key: the orchestrator runs a forwarder on `127.0.0.1`
+(`framework/evo/llm_forward.py`) that adds the key to each request, and dsh is given only that loopback address and
+a placeholder. The forwarder also counts the tokens that `status` and the records report for dsh episodes.
 
 ## Environment variables
 

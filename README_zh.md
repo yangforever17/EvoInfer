@@ -1,6 +1,10 @@
+<p align="center">
+  <img src="docs/assets/logo.png" width="240" alt="EvoInfer 吉祥物：头顶嫩芽、胸前挂着打勾 GPU 芯片的 Q 版六角恐龙">
+</p>
+
 # EvoInfer
 
-**推理系统的智能体自进化。** EvoInfer 让编程智能体（Codex、Claude Code）持续地自行改进一个大模型推理引擎：
+**推理系统的智能体自进化。** EvoInfer 让编程智能体（Codex、Claude Code、DeepSeek Harness）持续地自行改进一个大模型推理引擎：
 
 - 智能体提出修改；
 - 一个可信的适应度函数决定哪些修改留下；
@@ -16,7 +20,7 @@
 | 主线（20 智能体小时，Codex） | 解码 17.0 → 297.5 tok/s（17.5×）；端到端为默认 vLLM 的 1.73× / 1.85×；15 个版本中 7 个来自重组 |
 | 长上下文谱系（8K–31K 提示） | 通用引擎相对默认 vLLM 的优势降到 1.02×；进化两代（改动 34 行）后恢复到 1.60× |
 | 端侧谱系（32 GB 显卡，4 比特专家） | 在同一份权重上为默认 vLLM 的 1.61× / 1.79× |
-| 同一 harness 换策略模型（3 轮 × 2 智能体） | Qwen3.8-Max 6.43×，Codex 6.32×（3 次均值），GLM-5.3 4.31×，DeepSeek-V4-Pro 1.52× |
+| 同一 harness 换策略模型（3 轮 × 2 智能体） | Codex 6.77×（3 次均值），Qwen3.8-Max 6.43×，GLM-5.3 4.31×，DeepSeek-V4-Pro 1.52× |
 | 换目标模型、换种子引擎 | OLMoE-1B-7B 2.24×，Gemma 4 26B-A4B 9.12×，mini-sglang 种子 1.82× |
 
 进化出的引擎在 [`engines/`](engines/) 里，可以直接用 `orchestrator.py eval` 测。
@@ -43,7 +47,7 @@
 需要：
 
 - **GPU 机器**：Linux，一块 80 GB 显卡（A100 / H100，用于 BF16 的 Qwen3.5-35B-A3B），CUDA 13，Python 3.12。
-- **智能体一侧**：Python ≥ 3.11、git、rsync，以及已登录的 [Codex CLI](https://github.com/openai/codex) 或 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)。
+- **智能体一侧**：Python ≥ 3.11、git、rsync，以及任一智能体 CLI：已登录的 [Codex CLI](https://github.com/openai/codex) 或 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)，或者 DeepSeek Harness（`npm i -g @deepseek-ai/dsh`，Node ≥ 24.9，并设置 `DEEPSEEK_API_KEY`）。
 
 两侧可以是同一台机器（默认），也可以通过 SSH 连接两台机器。
 
@@ -69,7 +73,7 @@ python3 orchestrator.py evolve --rounds 3 --gpus 0,1                    # 每轮
 python3 orchestrator.py status                                          # 当前最优版本和全部实验记录
 ```
 
-`evolve` 默认用 Codex。`--agent claude` 改用 Claude Code；`--policy <名字>` 使用配置文件里定义的策略。
+`evolve` 默认用 Codex。`--agent claude` 改用 Claude Code，`--agent dsh` 改用 DeepSeek Harness；`--policy <名字>` 使用配置文件里定义的策略。
 
 - **用时**：一轮（两个 75 分钟的 episode 加整合）约 1.5–2 小时。
 - **token**：一个 episode 读 3–5 M 输入 token，大部分是缓存。
@@ -99,7 +103,8 @@ python3 orchestrator.py status                                          # 当前
 
 智能体会在你的 GPU 上运行自己写的代码。EvoInfer 限制了它们能接触的范围：
 
-- Codex 在 `--sandbox workspace-write` 下运行，Claude Code 只能用白名单里的工具。
+- Codex 和 DeepSeek Harness 在各自的 `workspace-write` 沙箱里运行，Claude Code 只能用白名单里的工具。
+- DeepSeek Harness 拿不到 API 密钥：它只连编排器里的一个本机转发器，由转发器加上密钥。
 - 评测器、判官和验收集都在智能体的工作区之外。
 - 智能体拿不到 GPU 机器的 SSH 权限或 API 密钥。
 

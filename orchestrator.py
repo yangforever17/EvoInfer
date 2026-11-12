@@ -19,11 +19,12 @@ worktree. So agents need neither network access nor credentials, and their sandb
 The GPU host is this machine ([host] mode = "local") or another one reached over SSH (mode = "ssh"); see
 evoinfer.example.toml and docs/configuration.md.
 """
-import argparse, base64, glob, json, os, shlex, shutil, subprocess, sys, threading, time, uuid
+import argparse, base64, glob, json, os, shlex, shutil, signal, subprocess, sys, threading, time, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "framework"))
 from evo import config as C   # noqa: E402  (stdlib only: safe to import on the agent side)
+from evo.llm_forward import Forwarder   # noqa: E402  (stdlib only)
 
 CFG = C.CFG
 MODE = CFG["host"]["mode"]
@@ -38,7 +39,7 @@ RSYNC_E = (f"ssh {'-F ' + shlex.quote(_ssh_cfg) + ' ' if _ssh_cfg else ''}-o Ser
 PY = CFG["host"]["python"] or ("venv/bin/python" if MODE == "ssh" or os.path.exists(os.path.join(REMOTE, "venv/bin/python")) else sys.executable)
 if MODE == "local":
     PY = os.path.expanduser(PY)
-LOCAL_ONLY = [".claude", ".evo", "AGENTS.md", ".git"]  # agent-side only: skills, job queue, notes (the GPU-host tree keeps its own git history)
+LOCAL_ONLY = [".claude", ".dsh", ".evo", "AGENTS.md", ".git"]  # agent-side only: skills, job queue, notes (the GPU-host tree keeps its own git history)
 RUNS = os.path.join(HERE, "runs")
 SKILL_VERSIONS = os.path.join(HERE, "skills")   # v0, v1, ... ; CURRENT names the default
 AG = CFG["agents"]
@@ -70,16 +71,25 @@ EVO_PY = f"PYTHONPATH=framework {shq(PY)}"   # framework commands, run with cwd 
 
 
 # A policy (--policy) = an agent CLI plus the model behind it; the harness (actions through `evo`, feedback, skills,
-# budget) is the same for all of them. "codex" and "claude" use the CLIs' own login and default (or [agents]) model.
+# budget) is the same for all of them. "codex" and "claude" use the CLIs' own login and default (or [agents]) model;
+# "dsh" (DeepSeek Harness) uses DeepSeek's official API with the key in $DEEPSEEK_API_KEY.
 # More policies come from [policies.<name>] in evoinfer.toml - e.g. Claude Code against an Anthropic-compatible
-# gateway serving another model, with the endpoint and key read from environment variables (never from a file here).
-POLICIES = {"codex": {"cli": "codex"}, "claude": {"cli": "claude"}}
+# gateway serving another model, or DeepSeek Harness against an OpenAI-compatible one, with the endpoint and key read
+# from environment variables (never from a file here).
+AGENT_KINDS = ["codex", "claude", "dsh"]
+POLICIES = {"codex": {"cli": "codex"}, "claude": {"cli": "claude"},
+            "dsh": {"cli": "dsh", "api": "deepseek", "api_key_env": "DEEPSEEK_API_KEY"}}
 POLICIES.update({k: dict(v) for k, v in CFG.get("policies", {}).items()})
 POLICY = ""       # --policy; "" = whatever --agent says with that CLI's default model
 
 
 def policy_model(pol, kind):
-    return pol.get("model") or (AG["codex_model"] if kind == "codex" else AG["claude_model"]) or None
+    return pol.get("model") or AG.get(f"{kind}_model") or None
+
+
+def agent_dir(kind):
+    """The agent-local directory in a worktree (skills, sibling diffs): never shipped to the GPU host."""
+    return {"claude": ".claude", "dsh": ".dsh"}.get(kind, ".evo")
 
 
 def gateway_env(pol):
@@ -244,7 +254,7 @@ def engine_note():
 
 def build_prompt(eid, kind, wt, parent, focus, max_evals, minutes):
     pm = parent["result"]["metrics"]
-    skills_dir = ".claude/skills" if kind == "claude" else ".evo/skills"
+    skills_dir = f"{agent_dir(kind)}/skills"
     return f"""You are an optimization agent in EvoInfer, episode {eid}.
 Your working directory is a git worktree of an LLM inference engine (branch agent/{eid}, parent commit {parent['commit'][:10]}).
 Before anything else read the skills in {skills_dir}/ - start with {skills_dir}/evo-workflow/SKILL.md - and run `evo history`.
@@ -270,7 +280,7 @@ Finish with `evo submit -m "<hypothesis> | <change> | <measured effect> | <next 
 def setup_worktree(eid, kind, parent, skills):
     rwt = f"{REMOTE}/agents/{eid}/engine"
     sh(f"rm -rf {rwt} && git clone -q {REMOTE}/engine.git {rwt} && cd {rwt} && git checkout -q -b agent/{eid} {parent['commit']}"
-       f" && printf '.claude/\\n.evo/\\nAGENTS.md\\n' >> .git/info/exclude")
+       f" && printf '.claude/\\n.dsh/\\n.evo/\\nAGENTS.md\\n' >> .git/info/exclude")
     return make_local(eid, kind, rwt, skills)
 
 
@@ -281,20 +291,19 @@ def make_local(eid, kind, rwt, skills):
     rsync(rp(f"{rwt}/"), local + "/")
     src = os.path.join(SKILL_VERSIONS, skills)
     ignore = shutil.ignore_patterns("CHANGELOG.md")       # the meta-agent's rationale is for the next meta-agent, not for workers
-    if kind == "claude":
-        shutil.copytree(src, os.path.join(local, ".claude", "skills"), dirs_exist_ok=True, ignore=ignore)
-    else:
-        shutil.copytree(src, os.path.join(local, ".evo", "skills"), dirs_exist_ok=True, ignore=ignore)
+    d = agent_dir(kind)   # Claude Code and DeepSeek Harness discover <d>/skills themselves; Codex reads AGENTS.md
+    shutil.copytree(src, os.path.join(local, d, "skills"), dirs_exist_ok=True, ignore=ignore)
+    if kind != "claude":
         with open(os.path.join(local, "AGENTS.md"), "w") as f:
-            f.write("# EvoInfer agent notes\nSkills for this task live in `.evo/skills/*/SKILL.md`; read "
-                    "`.evo/skills/evo-workflow/SKILL.md` first. GPU work only through the `evo` command.\n")
+            f.write(f"# EvoInfer agent notes\nSkills for this task live in `{d}/skills/*/SKILL.md`; read "
+                    f"`{d}/skills/evo-workflow/SKILL.md` first. GPU work only through the `evo` command.\n")
     return local
 
 
 def add_sibling(local, kind, sib_eid):
     """Copy a sibling episode's diff (against its own parent) and report into the agent-local area."""
     row = [json.loads(l) for l in sh(f"grep '\"id\": \"{sib_eid}\"' {REMOTE}/records/experiments.jsonl").splitlines()][-1]
-    d = os.path.join(local, ".claude" if kind == "claude" else ".evo", "sibling"); os.makedirs(d, exist_ok=True)
+    d = os.path.join(local, agent_dir(kind), "sibling"); os.makedirs(d, exist_ok=True)
     rwt = f"{REMOTE}/agents/{sib_eid}/engine"
     open(os.path.join(d, "sibling.patch"), "w").write(sh(f"cd {rwt} && git diff {row['parent']} {row['commit']}"))
     for f in sh(f"cd {rwt} && git ls-files '*.md' | grep -iv readme || true").split():
@@ -304,6 +313,14 @@ def add_sibling(local, kind, sib_eid):
 
 
 def parse_cost(kind, log):
+    if kind == "dsh":
+        # tokens as counted by the forwarder (dsh-usage.json); turns = model requests
+        try:
+            u = json.load(open(os.path.join(os.path.dirname(log), "dsh-usage.json")))
+        except (OSError, ValueError):
+            u = {}
+        usage = {k: u.get(k, 0) for k in ("input_tokens", "cached_input_tokens", "output_tokens")}
+        return {"usage": usage, "turns": u.get("requests"), "errors": u.get("errors")}
     if kind == "claude":
         cost = {"usd": None, "turns": None}
         seen = {}
@@ -429,15 +446,61 @@ class JobExecutor:
                 return sh(f"cat {jd}/{jid}.out", check=False), int(rc)
 
 
+DSH_CMD_TIMEOUT_S = 2400   # dsh's shell tool stops a command after 60 s by default; `evo eval` can take ~10-40 minutes
+
+
+def dsh_route(pol, model):
+    """How DeepSeek Harness reaches its model: (Forwarder, env for dsh, patch YAML). dsh only ever sees a loopback
+    address and a placeholder key; the forwarder (in this process) adds the real key, read from $<api_key_env>.
+      api = "deepseek": dsh's own DeepSeek provider (Anthropic Messages wire format; default https://api.deepseek.com/anthropic)
+      api = "openai":   any OpenAI-compatible chat-completions endpoint (base_url / base_url_env, e.g. https://host/v1)"""
+    api = pol.get("api", "deepseek")
+    key = os.environ.get(pol.get("api_key_env") or "")
+    base = pol.get("base_url") or (os.environ.get(pol["base_url_env"]) if pol.get("base_url_env") else None)
+    if not key:
+        raise SystemExit(f"the dsh policy needs its API key in ${pol.get('api_key_env')}")
+    proxy = os.environ.get(pol["proxy_env"]) if pol.get("proxy_env") else None
+    common = (f"- id: bash-sandbox\n  config:\n    timeoutMs: {DSH_CMD_TIMEOUT_S * 1000}\n"
+              "- id: tool-web\n  disabled: true\n")          # no web access, as for the Codex and Claude Code agents
+    if api == "deepseek":
+        fw = Forwarder(base or "https://api.deepseek.com/anthropic", key, auth="x-api-key", proxy=proxy)
+        port = fw.start()
+        env = {"DEEPSEEK_BASE_URL": f"http://127.0.0.1:{port}", "DEEPSEEK_API_KEY": "local-forwarder"}
+        patch = f"- id: agent-default-model\n  config:\n    provider: deepseek-official\n    model: {model}\n" + common
+    elif api == "openai":
+        if not base:
+            raise SystemExit("an api = \"openai\" dsh policy needs base_url or base_url_env (e.g. https://host/v1)")
+        fw = Forwarder(base, key, auth="bearer", strip_prefix="/v1", proxy=proxy)
+        port = fw.start()
+        env = {"DSH_GW_KEY": "local-forwarder"}
+        patch = (f"- id: llm-pi-ai\n  config:\n    providers:\n      evo-gw:\n        displayName: EvoInfer model endpoint\n"
+                 f"        apiKeyEnv: DSH_GW_KEY\n        api: openai-completions\n        baseURL: http://127.0.0.1:{port}/v1\n"
+                 f"        models:\n          - id: {model}\n            contextWindow: {int(pol.get('context_window', 131072))}\n"
+                 f"            maxTokens: {int(pol.get('max_tokens', 32768))}\n"
+                 f"- id: agent-default-model\n  config:\n    provider: evo-gw\n    model: {model}\n" + common)
+    else:
+        raise SystemExit(f"dsh policy: api must be 'deepseek' or 'openai', not {api!r}")
+    return fw, env, "# written by orchestrator.py: the only changes to dsh's shipped headless profile\n" + patch
+
+
+def dsh_command(patch_path):
+    """Headless one-shot run, task on stdin. dsh's own sandbox (bubblewrap/Landlock on Linux, Seatbelt on macOS)
+    confines every command to the worktree; with --approval-policy never anything else is refused, not asked."""
+    return [AG["dsh_bin"], "--profile", "headless", "--patch", patch_path, "--json",
+            "--permission-mode", "workspace-write", "--approval-policy", "never", "-"]
+
+
 def run_agent(kind, eid, local, gpu, parent_result, prompt, max_evals, minutes, arm=""):
     settings = dict(EVO_ARM=arm or LIN, EVO_SCENARIO=SCEN, EVO_GPU=gpu, EVO_PARENT_RESULT=parent_result,
                     EVO_MAX_EVALS=max_evals, EVO_EPISODE_START=int(time.time()), EVO_ISOLATED=os.environ.get("EVO_ISOLATED", ""))
     env = dict(os.environ, EVO_AGENT_ID=eid, EVO_LOCAL_WORKTREE=local, PATH=os.path.join(HERE, "bin") + os.pathsep + os.environ["PATH"])
     env.pop("CLAUDECODE", None)
-    pol = POLICIES.get(POLICY, {})
-    if pol.get("base_url_env"):
+    pol = POLICIES.get(POLICY) or POLICIES.get(kind, {})
+    if kind == "claude" and pol.get("base_url_env"):
         env.update(gateway_env(pol))
     model = policy_model(pol, kind)
+    if kind == "dsh":
+        return run_dsh(eid, local, settings, env, pol, model, prompt, minutes)
     if kind == "claude":
         # `evo eval` on a slow engine runs far longer than Claude Code's default 2-minute shell limit
         env.update(BASH_DEFAULT_TIMEOUT_MS="2400000", BASH_MAX_TIMEOUT_MS="3600000")
@@ -463,6 +526,43 @@ def run_agent(kind, eid, local, gpu, parent_result, prompt, max_evals, minutes, 
             pass
     sync_worktree(eid, local)
     return parse_cost(kind, log), time.time() - t0
+
+
+def run_dsh(eid, local, settings, env, pol, model, prompt, minutes):
+    if not model:
+        raise SystemExit("set [agents] dsh_model or the policy's model")
+    if os.path.realpath(HERE).startswith(("/tmp/", "/private/tmp/")):
+        # dsh's workspace-write sandbox mounts an empty /tmp, which would hide bin/evo from the agent's shell
+        raise SystemExit("--agent dsh: move the EvoInfer checkout out of /tmp (dsh's sandbox replaces /tmp)")
+    run_dir = os.path.join(RUNS, eid)
+    fw, route_env, patch = dsh_route(pol, model)
+    patch_path = os.path.join(run_dir, "dsh.patch.yml")
+    open(patch_path, "w").write(patch)
+    dhome = os.path.join(run_dir, "dshhome")          # per-episode sessions/settings; no user-level AGENTS.md or skills
+    os.makedirs(os.path.join(dhome, "agents"), exist_ok=True)
+    for k in {pol.get("api_key_env"), "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"} - {None}:
+        env.pop(k, None)                               # the real key stays in this process (the forwarder)
+    env.update(route_env, DSH_HOME=dhome, DSH_AGENTS_HOME=os.path.join(dhome, "agents"))
+    log = os.path.join(run_dir, "dsh.jsonl")
+    t0 = time.time()
+    try:
+        with JobExecutor(eid, local, settings), open(log, "w") as out, open(os.path.join(run_dir, "dsh.err"), "w") as err:
+            p = subprocess.Popen(dsh_command(patch_path), cwd=local, env=env, stdin=subprocess.PIPE, stdout=out,
+                                 stderr=err, text=True, start_new_session=True)
+            p.stdin.write(prompt); p.stdin.close()
+            try:
+                p.wait(timeout=minutes * 60 + 600)
+            except subprocess.TimeoutExpired:            # stop dsh and everything it started (shells, subagents)
+                os.killpg(p.pid, signal.SIGTERM)
+                try:
+                    p.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    os.killpg(p.pid, signal.SIGKILL); p.wait()
+    finally:
+        fw.stop()
+        json.dump(fw.usage, open(os.path.join(run_dir, "dsh-usage.json"), "w"))
+    sync_worktree(eid, local)
+    return parse_cost("dsh", log), time.time() - t0
 
 
 ENGINE_PATHS = "nanovllm evo_config.json"   # what the bench runner loads; tests, notes and scripts do not change the engine
@@ -1122,8 +1222,15 @@ def doctor(a):
     print("agent side (this machine):")
     for tool in ("git", "rsync", "bash"):
         good &= _check(shutil.which(tool) is not None, tool, f"install {tool}")
-    have = [k for k in ("codex", "claude") if shutil.which(AG[f"{k}_bin"])]
-    good &= _check(bool(have), f"agent CLI: {', '.join(have) or 'none'}", "install the Codex CLI (`npm i -g @openai/codex`) or Claude Code")
+    have = [k for k in AGENT_KINDS if shutil.which(AG[f"{k}_bin"])]
+    good &= _check(bool(have), f"agent CLI: {', '.join(have) or 'none'}",
+                   "install the Codex CLI (`npm i -g @openai/codex`), Claude Code or DeepSeek Harness (`npm i -g @deepseek-ai/dsh`)")
+    if "dsh" in have:
+        node = subprocess.run(["node", "--version"], capture_output=True, text=True) if shutil.which("node") else None
+        nv = tuple(int(x) for x in node.stdout.strip().lstrip("v").split(".")[:2]) if node and node.returncode == 0 else (0, 0)
+        _check(nv >= (24, 9), f"node {'.'.join(map(str, nv)) if nv != (0, 0) else 'missing'} for dsh (>= 24.9)", "install Node.js >= 24.9")
+        _check(bool(os.environ.get(POLICIES["dsh"]["api_key_env"])), "dsh: $DEEPSEEK_API_KEY set (built-in dsh policy)",
+               "export DEEPSEEK_API_KEY=..., or use a [policies.<name>] with cli = \"dsh\"")
     print("GPU host:")
     if MODE == "ssh" and not _check(subprocess.run(remote_argv("true"), capture_output=True).returncode == 0,
                                     f"ssh {CFG['host']['ssh_host']}", "check [host] ssh_host / ssh_config and that `ssh <host> true` works"):
@@ -1296,7 +1403,7 @@ if __name__ == "__main__":
     ap.add_argument("--lineage", default="", help="work inside a scenario lineage (archive-<name>.json) instead of the main line")
     ap.add_argument("--policy", default="", choices=[""] + list(POLICIES), help="agent CLI + model (overrides --agent)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    e = sub.add_parser("episode"); e.add_argument("--agent", choices=["claude", "codex"], default="codex")
+    e = sub.add_parser("episode"); e.add_argument("--agent", choices=AGENT_KINDS, default="codex")
     e.add_argument("--gpu", type=int, required=True); e.add_argument("--focus", choices=list(FOCUS), default="free")
     e.add_argument("--sibling", help="episode id whose changes a merge episode should port")
     e.add_argument("--max-evals", type=int, default=10); e.add_argument("--minutes", type=int, default=90)
@@ -1305,7 +1412,7 @@ if __name__ == "__main__":
     e.add_argument("--arm", help="ablation arm: own board and history view, never promoted")
     e.add_argument("--no-promote", action="store_true")
     it = sub.add_parser("integrate"); it.add_argument("--gpu", type=int, required=True)
-    it.add_argument("--agent", choices=["claude", "codex"], default="codex")
+    it.add_argument("--agent", choices=AGENT_KINDS, default="codex")
     m = sub.add_parser("merge"); m.add_argument("--episode", required=True); m.add_argument("--gpu", type=int, required=True)
     c = sub.add_parser("challenge"); c.add_argument("--episode", required=True); c.add_argument("--gpu", type=int, required=True)
     g = sub.add_parser("regate"); g.add_argument("--dry-run", action="store_true")
@@ -1317,7 +1424,7 @@ if __name__ == "__main__":
     sub.add_parser("setup", help="prepare the GPU host: framework, prompt sets, engine archive, judge engine")
     ev = sub.add_parser("evolve", help="run rounds of parallel episodes + integrate (the paper's protocol)")
     ev.add_argument("--rounds", type=int, default=3); ev.add_argument("--gpus", required=True, help="one episode per GPU per round, e.g. 0,1")
-    ev.add_argument("--agent", choices=["claude", "codex"], default="codex"); ev.add_argument("--minutes", type=int, default=75)
+    ev.add_argument("--agent", choices=AGENT_KINDS, default="codex"); ev.add_argument("--minutes", type=int, default=75)
     ev.add_argument("--max-evals", type=int, default=8); ev.add_argument("--skills")
     ev.add_argument("--foci", help='focus per agent per round, rounds separated by "|", e.g. "overhead free|spec moe|free free"')
     ie = sub.add_parser("import-engine", help="add an engine directory to the archive as a tag (a new seed engine)")

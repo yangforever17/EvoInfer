@@ -1,6 +1,6 @@
 # Architecture
 
-EvoInfer treats self-evolution as a harness-design problem. The policy model (the LLM inside Codex or Claude Code)
+EvoInfer treats self-evolution as a harness-design problem. The policy model (the LLM inside Codex, Claude Code or DeepSeek Harness)
 stays fixed. What evolves is the inference engine and the knowledge the agents work from. The harness decides what an
 agent can do, what feedback it gets, what it knows and how much budget it has.
 
@@ -27,7 +27,8 @@ So the agent's sandbox needs only its worktree: no network, no SSH keys, no API 
 `orchestrator.py episode --gpu G --focus F` (or `evolve`, which runs several):
 
 1. **Worktree.** A clone of the archive at the lineage's current best (or `--parent TAG`), plus the skills of the
-   chosen version (`.evo/skills/` for Codex with an `AGENTS.md` pointer, `.claude/skills/` for Claude Code). Skills and
+   chosen version (`.evo/skills/` for Codex with an `AGENTS.md` pointer, `.claude/skills/` for Claude Code,
+   `.dsh/skills/` plus `AGENTS.md` for DeepSeek Harness). Skills and
    the job queue are agent-side only and never reach the evaluated tree.
 2. **Prompt.** The parent's measured performance, the scenario's goal, the focus, the coordination rules and the budget.
 3. **The agent works.** It profiles with `evo run`, checks candidates with `evo eval` (quick mode: 6 dev prompts,

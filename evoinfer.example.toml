@@ -28,8 +28,11 @@ codex_bin = "codex"                 # Codex CLI, logged in (`codex login`)
 # codex_model = ""                  # empty: the CLI's default
 claude_bin = "claude"               # Claude Code, logged in
 # claude_model = ""                 # empty: the CLI's default
+dsh_bin = "dsh"                     # DeepSeek Harness (npm i -g @deepseek-ai/dsh, Node >= 24.9); key in $DEEPSEEK_API_KEY
+# dsh_model = "deepseek-v4-pro"
 
-# Extra policies (--policy <name>): Claude Code driving another model through an Anthropic-compatible endpoint.
+# Extra policies (--policy <name>): an agent CLI driving another model. Claude Code needs an Anthropic-compatible
+# endpoint; DeepSeek Harness takes DeepSeek's API (api = "deepseek") or any OpenAI-compatible one (api = "openai").
 # The endpoint URL and key are read from the environment variables named here - never put keys in this file.
 # [policies.qwen]
 # cli = "claude"
@@ -38,6 +41,14 @@ claude_bin = "claude"               # Claude Code, logged in
 # base_url_env = "QWEN_ANTHROPIC_BASE"
 # api_key_env = "QWEN_API_KEY"
 # proxy_env = ""                    # optional: name of a variable holding an HTTPS proxy for the CLI
+#
+# [policies.dsh-qwen]
+# cli = "dsh"
+# api = "openai"
+# model = "qwen3.8-max"
+# base_url_env = "QWEN_OPENAI_BASE"  # e.g. https://host/v1
+# api_key_env = "QWEN_API_KEY"
+# context_window = 262144
 #
 # [policies.glm]
 # cli = "claude"

@@ -1,6 +1,10 @@
+<p align="center">
+  <img src="docs/assets/logo.png" width="240" alt="EvoInfer mascot: a chibi axolotl with a sprout and a checked GPU chip">
+</p>
+
 # EvoInfer
 
-**Agentic self-evolution of LLM inference systems.** EvoInfer lets coding agents (Codex, Claude Code) keep improving an
+**Agentic self-evolution of LLM inference systems.** EvoInfer lets coding agents (Codex, Claude Code, DeepSeek Harness) keep improving an
 LLM inference engine on their own: agents propose changes, a trustworthy fitness function decides which ones survive,
 accepted versions become the starting point of the next generation, and the knowledge the agents work from evolves
 with them.
@@ -17,7 +21,7 @@ version is checked token by token against a frozen reference implementation.
 | Main line (20 agent-hours, Codex) | decode 17.0 → 297.5 tok/s (17.5x); end-to-end 1.73x / 1.85x default vLLM; 7 of 15 versions came from recombination |
 | Long-context lineage (8K-31K prompts) | the general engine's lead over default vLLM drops to 1.02x; two generations (34 changed lines) restore it to 1.60x |
 | Edge lineage (32 GB GPU, 4-bit experts) | 1.61x / 1.79x default vLLM on the same weights |
-| Same harness, other policy models (3 rounds × 2 agents) | Qwen3.8-Max 6.43x, Codex 6.32x (mean of 3 runs), GLM-5.3 4.31x, DeepSeek-V4-Pro 1.52x |
+| Same harness, other policy models (3 rounds × 2 agents) | Codex 6.77x (mean of 3 runs), Qwen3.8-Max 6.43x, GLM-5.3 4.31x, DeepSeek-V4-Pro 1.52x |
 | Other target models, other seed engine | OLMoE-1B-7B 2.24x, Gemma 4 26B-A4B 9.12x, mini-sglang seed 1.82x |
 
 The evolved engines ship in [`engines/`](engines/) and can be benchmarked directly (`orchestrator.py eval`).
@@ -63,8 +67,9 @@ Details: [docs/architecture.md](docs/architecture.md).
 Requirements:
 
 - **GPU host:** Linux with an 80 GB GPU (A100/H100) for Qwen3.5-35B-A3B in BF16, CUDA 13 and Python 3.12.
-- **Agent side:** Python ≥ 3.11, git, rsync, and the [Codex CLI](https://github.com/openai/codex) or
-  [Claude Code](https://docs.anthropic.com/en/docs/claude-code), logged in.
+- **Agent side:** Python ≥ 3.11, git, rsync, and one agent CLI: the [Codex CLI](https://github.com/openai/codex) or
+  [Claude Code](https://docs.anthropic.com/en/docs/claude-code), logged in, or DeepSeek Harness
+  (`npm i -g @deepseek-ai/dsh`, Node ≥ 24.9) with `DEEPSEEK_API_KEY` set.
 
 The agent side and the GPU host can be one machine (default) or two machines connected over SSH.
 
@@ -90,7 +95,8 @@ python3 orchestrator.py evolve --rounds 3 --gpus 0,1                    # per ro
 python3 orchestrator.py status                                          # best version and every experiment
 ```
 
-`evolve` uses Codex by default (`--agent claude` for Claude Code, `--policy <name>` for a policy from the config). One
+`evolve` uses Codex by default (`--agent claude` for Claude Code, `--agent dsh` for DeepSeek Harness, `--policy <name>`
+for a policy from the config). One
 round of two 75-minute episodes plus integration takes about 1.5-2 hours. An episode reads 3-5 M input tokens, mostly
 cached. Every agent transcript is kept under `runs/<episode>/`; every evaluation, verdict and archive is kept under the
 EvoInfer home on the GPU host (`~/.evoinfer/records`).
@@ -122,7 +128,8 @@ EvoInfer home on the GPU host (`~/.evoinfer/records`).
 
 Agents run their own code on your GPUs. EvoInfer limits what they can reach:
 
-- Codex runs with `--sandbox workspace-write` and Claude Code with a tool allow-list.
+- Codex and DeepSeek Harness run in their `workspace-write` sandboxes, and Claude Code with a tool allow-list.
+- DeepSeek Harness never holds an API key: it talks to a loopback forwarder in the orchestrator that adds the key.
 - The evaluator, the judge and the holdout prompts live outside the agent's worktree.
 - Agents never get SSH access or API keys for the GPU host.
 

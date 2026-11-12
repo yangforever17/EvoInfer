@@ -20,18 +20,15 @@ as the bare loop nudges. Records: <home>/records/no_harness.jsonl (arm nh-dsh); 
 The paper's run (Qwen3.8-Max; the endpoint's quota ran out after 200.7 of 450 minutes): 7.37x / 7.97x decode.
 """
 import argparse
-import http.server
 import json
 import os
 import shutil
 import signal
 import subprocess
-import threading
 import time
-import urllib.error
-import urllib.request
 
 import common as C
+from evo.llm_forward import Forwarder
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--gpu", type=int, required=True); ap.add_argument("--model", required=True)
@@ -60,86 +57,8 @@ def install_dirs():
 
 # ---------------------------------------------------------------- the model route: a key-adding local forwarder
 BASE, KEY = C.endpoint()
-OPENER = urllib.request.build_opener()     # honours $HTTPS_PROXY of this process, not the agent's
-USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "requests": 0, "errors": 0}
-LOCK = threading.Lock()
-
-
-def _count(obj):
-    u = obj.get("usage") if isinstance(obj, dict) else None
-    if u:
-        with LOCK:
-            USAGE["prompt_tokens"] += u.get("prompt_tokens") or 0
-            USAGE["completion_tokens"] += u.get("completion_tokens") or 0
-            USAGE["cached_tokens"] += (u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
-
-
-class Forward(http.server.BaseHTTPRequestHandler):
-    def log_message(self, *a):
-        pass
-
-    def _relay(self, method):
-        body = self.rfile.read(int(self.headers.get("Content-Length") or 0)) if method == "POST" else None
-        path = self.path[len("/v1"):] if self.path.startswith("/v1") else self.path
-        req = urllib.request.Request(BASE + path, data=body, method=method,
-                                     headers={"Authorization": "Bearer " + KEY, "Content-Type": "application/json",
-                                              "Accept": self.headers.get("Accept") or "*/*"})
-        with LOCK:
-            USAGE["requests"] += 1
-        try:
-            r = OPENER.open(req, timeout=1200)
-        except urllib.error.HTTPError as e:
-            with LOCK:
-                USAGE["errors"] += 1
-            data = e.read()
-            self.send_response(e.code); self.send_header("Content-Type", e.headers.get("Content-Type") or "application/json")
-            self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
-            return
-        except Exception as e:  # tunnel / gateway down: a 502 lets dsh's own retry policy handle it
-            with LOCK:
-                USAGE["errors"] += 1
-            data = json.dumps({"error": {"message": f"forwarder: {type(e).__name__}"}}).encode()
-            self.send_response(502); self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
-            return
-        self.send_response(r.status)
-        self.send_header("Content-Type", r.headers.get("Content-Type") or "application/json")
-        self.end_headers()                      # HTTP/1.0: the body ends when the connection closes
-        stream = "event-stream" in (r.headers.get("Content-Type") or "")
-        buf, whole = b"", []
-        try:
-            while chunk := r.read1(65536):
-                self.wfile.write(chunk); self.wfile.flush()
-                if stream:
-                    buf += chunk
-                    *lines, buf = buf.split(b"\n")
-                    for ln in lines:
-                        if ln.startswith(b"data:") and b'"usage"' in ln:
-                            try:
-                                _count(json.loads(ln[5:]))
-                            except ValueError:
-                                pass
-                else:
-                    whole.append(chunk)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        if whole:
-            try:
-                _count(json.loads(b"".join(whole)))
-            except ValueError:
-                pass
-
-    def do_POST(self):
-        self._relay("POST")
-
-    def do_GET(self):
-        self._relay("GET")
-
-
-def start_forwarder():
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Forward)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv.server_address[1]
+FW = Forwarder(BASE, KEY, auth="bearer", strip_prefix="/v1")   # honours $HTTPS_PROXY of this process, not the agent's
+USAGE = FW.usage
 
 
 # ---------------------------------------------------------------- dsh inside bubblewrap
@@ -208,7 +127,7 @@ def main():
     rwt, local = C.prepare(eid, seed)
     run_dir = os.path.dirname(local)
     os.makedirs(os.path.join(run_dir, "dshhome"), exist_ok=True)
-    port = start_forwarder()
+    port = FW.start()
     patch = os.path.join(run_dir, "dsh.patch.yml")
     write_patch(patch, port)
     env = C.agent_env(eid, local)

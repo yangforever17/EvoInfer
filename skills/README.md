@@ -2,7 +2,7 @@
 
 The knowledge the optimization agents read before each episode: Markdown files with `name` / `description`
 frontmatter, one directory per skill. `orchestrator.py` copies the chosen version into each agent's worktree
-(`.evo/skills/` for Codex, `.claude/skills/` for Claude Code). The copy is agent-local and never part of the
+(`.evo/skills/` for Codex, `.claude/skills/` for Claude Code, `.dsh/skills/` for DeepSeek Harness). The copy is agent-local and never part of the
 evaluated engine.
 
 - `v0/`: the hand-written skills the paper's runs started from. `evo-workflow` is the entry point (the rules and the

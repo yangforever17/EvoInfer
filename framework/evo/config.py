@@ -43,9 +43,11 @@ DEFAULTS = {
         "codex_model": "",        # empty: the Codex CLI's default model
         "claude_bin": "claude",
         "claude_model": "",       # empty: the Claude Code CLI's default model
+        "dsh_bin": "dsh",         # DeepSeek Harness (npm @deepseek-ai/dsh, Node >= 24.9)
+        "dsh_model": "deepseek-v4-pro",   # model of the built-in "dsh" policy (DeepSeek's official API)
     },
-    # A policy = agent CLI + model. Gateway policies run Claude Code against an Anthropic-compatible endpoint whose URL
-    # and key are read from the environment variables named here (never from this file).
+    # A policy = agent CLI + model. Gateway policies run Claude Code or DeepSeek Harness against another endpoint whose
+    # URL and key are read from the environment variables named here (never from this file).
     "policies": {},
 }
 

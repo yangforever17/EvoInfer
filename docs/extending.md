@@ -65,3 +65,30 @@ Skills are Markdown files with a frontmatter `name` / `description`, under `skil
 `evo-workflow/SKILL.md` is the entry point every agent reads first. Write a new version by hand or with
 `meta.py evolve`, then compare it against the old one with paired arms (`experiments/e4_skills.sh`) before making it
 the default in `skills/CURRENT`.
+
+## A new agent CLI
+
+Codex, Claude Code and DeepSeek Harness are wired in `orchestrator.py`; another CLI needs the same five pieces:
+
+1. **A kind** in `AGENT_KINDS`, its binary and default model in `[agents]` (`<kind>_bin`, `<kind>_model`, defaults in
+   `framework/evo/config.py`) and, if it can be used without configuration, a built-in entry in `POLICIES`.
+2. **Where its skills go**: `agent_dir(kind)` names the agent-local directory (`.evo`, `.claude`, `.dsh`); add it to
+   `LOCAL_ONLY` so it never reaches the GPU host. `make_local` copies the skills to `<dir>/skills` and writes an
+   `AGENTS.md` pointer for CLIs that read one.
+3. **How it runs**: a branch in `run_agent` (DeepSeek Harness has its own `run_dsh`). The CLI gets the prompt, runs in
+   the worktree with `bin/` first on `PATH` and `EVO_LOCAL_WORKTREE` set, and must confine its commands to the
+   worktree: the `evo` queue in `.evo/jobs` is the only way out. Wrap the run in `JobExecutor`.
+4. **Keys**: never in the agent's environment. If the CLI calls a model API itself, point it at a
+   `evo.llm_forward.Forwarder` on loopback (OpenAI `bearer` or Anthropic `x-api-key` auth) and remove the key variable
+   from the environment it gets, as `run_dsh` does.
+5. **Cost**: `parse_cost(kind, log)` returns `{"usage": {input_tokens, cached_input_tokens, output_tokens}, "turns": n}`
+   from the CLI's own event log, or from `Forwarder.usage`.
+
+Check a new CLI end to end before spending GPU time: run it against a fake model endpoint that first asks for one
+shell call (`evo board; echo x > ~/probe`) and then answers DONE, with a fake job server answering `.evo/jobs`. The
+DeepSeek Harness integration was checked this way with dsh 0.2.2 on Linux, for both `api = "deepseek"` and
+`api = "openai"`. The skills appeared in the first request, `evo board` made the round trip through the queue, and
+the write outside the worktree was refused (read-only file system). The real key reached only the fake upstream,
+and the logs, the patch file and dsh's environment never contained it. Two things to know about dsh's sandbox:
+it replaces `/tmp` with an empty directory, so the EvoInfer checkout must not live under `/tmp`; and its shell
+tool stops commands after 60 s unless configured (`run_dsh` raises the limit to 40 minutes for `evo eval`).
