@@ -1,0 +1,57 @@
+Episode 11101414-codex-quant-6aeb; parent 6af9511a0e; RTX 5090
+
+Hypothesis: duplicated byte-addressed INT4 loads and small down-projection
+row tiles waste decode bandwidth/instructions. Keep canonical FP32 scaling
+rounded to BF16, projection/SiLU/weighting boundaries, and route reduction.
+
+Selected implementation: reinterpret packed storage as aligned uint32 words,
+expand eight nibbles per word, retain four gate/up rows, use eight down rows
+for T<4 and sixteen for T>=4. BF16 and prefill paths are unchanged.
+
+Component validation via evo run tests/check_int4_packed.py:
+Three seeds, T=1/2/4/8, eager and changed-input/changed-route CUDA replay:
+all outputs bitwise equal to frozen parent. Warm graph MoE microseconds:
+T1 parent31.79 candidate26.06; T2 47.28->39.21;
+T4 74.74->59.68; T8 135.33->105.72.
+These resident single-layer timings are NOT whole-engine gain estimates.
+
+Rejected byte-interleave version: 5.09M real outputs bitwise identical,
+12 alternating 256-token pairs identical tokens/acceptance, but parent
+363.968->357.059 decode tok/s (-1.90%),324.459->318.487 e2e (-1.84%).
+Cycling 16 route sets through384MiB weights reproduced its regression:
+T4 parent62.7-64.5us, byte65.6-66.0us, untuned-word55.8-56.1us.
+Lesson: resident single-layer microbenchmark wins can reverse under full
+weight traffic. Use actual paired generations before judged evaluation.
+
+Word-load down-row tuning (cycling16 route sets; all outputs parent-exact):
+T1 down rows4/8/16:8.06/7.69/7.87us.
+T4 down rows4/8/16:23.74/20.74/19.37us.
+Gate rows8/16 regressed; four rows retained.
+
+Two final paired-run launches failed during model construction, before any
+candidate kernel executed, from external GPU occupancy. Process allocations
+18.00/12.35GiB at OOM vs31.36GiB device capacity. Retried with a free-memory
+wait in the validation harness; no engine/config change for this issue.
+
+Successful final alternating model validation (same loaded model, separate
+parent/candidate CUDA graph caches and pools, current evo_config.json):
+651 main/MTP calls and5,089,280 real output elements bitwise parent-exact.
+Six ordinary domains, two reversed-order passes,256 new tokens each:
+all12 pairs have identical tokens,1080 total steps and1994 accepted drafts.
+Parent363.933752->candidate386.032516 decode tok/s (+6.072%).
+Parent323.730029->candidate340.866180 e2e tok/s (+5.293%).
+Repeat0/1 decode gains+6.149%/+5.995%; e2e+5.267%/+5.320%.
+Per-domain decode gains5.710-6.510%; e2e5.026-5.708%.
+All domains improved; no token/acceptance differences confound the timings.
+
+Strict full-dev evaluation1110-144536-11101414-codex-quant-6aeb-e1-d9e0:
+PASS3072 tokens,0hard violations,1allowed soft violation(gap0.625),23near ties.
+406.78decode tok/s;329.61e2e tok/s;meanTTFT0.15s;
+MTP acceptance0.739;tokens/step3.217. One of ten allowed evals used.
+Stored-parent gains+21.8%/+19.3% include environmental drift; use the
+controlled paired+6.07%/+5.29% as causal performance evidence.
+Hidden holdout is not accessed or claimed; final acceptance is evaluator-owned.
+
+Next opportunity (untested): profile grouped INT4 prefill with larger K tiles
+aligned to128-value scale groups to reduce repeated unpack/scale overhead.
+Do not repeat byte-only vectorization or gate rows8/16 without a new premise.

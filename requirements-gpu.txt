@@ -1,0 +1,10 @@
+# GPU host (the machine that runs evaluations). Versions the paper used; Python 3.12, CUDA 13.
+# vllm is only needed for its bundled FlashAttention kernels (vllm.vllm_flash_attn), which the engines import.
+vllm==0.30.0
+transformers==5.22.1
+flash-linear-attention==0.6.0
+xxhash
+safetensors
+pandas          # only for rebuilding the prompt sets (evo.build_workloads)
+pyarrow         # same
+pytest

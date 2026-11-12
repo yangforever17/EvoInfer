@@ -1,0 +1,17 @@
+#!/bin/bash
+# `evo` as agents see it. The agent's sandbox only needs its own worktree: each call is written to a queue inside the
+# worktree (.evo/jobs) and served by the orchestrator's JobExecutor, which mirrors the worktree to the GPU host, runs
+# the real `evo` (framework/evo/cli.py) there with the episode's settings and writes the output back.
+#   evo eval | evo run -- <cmd> | evo history | evo board | evo claim | evo note | evo release | evo submit
+set -euo pipefail
+WT="${EVO_LOCAL_WORKTREE:?evo: run inside an EvoInfer episode (EVO_LOCAL_WORKTREE is not set)}"
+JOBS="$WT/.evo/jobs"
+mkdir -p "$JOBS"
+JOB="job-$(date +%s)-$$-$RANDOM"
+printf '%s\0' "$@" | base64 | tr -d '\n' > "$JOBS/$JOB.tmp"
+mv "$JOBS/$JOB.tmp" "$JOBS/$JOB.req"          # atomic: the executor never sees a half-written request
+while [ ! -f "$JOBS/$JOB.rc" ]; do sleep 2; done
+cat "$JOBS/$JOB.out"
+RC=$(tr -d '[:space:]' < "$JOBS/$JOB.rc")
+rm -f "$JOBS/$JOB.out" "$JOBS/$JOB.rc" "$JOBS/$JOB.taken"
+exit "${RC:-1}"

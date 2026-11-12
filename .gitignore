@@ -1,0 +1,8 @@
+# local configuration (copy evoinfer.example.toml)
+evoinfer.toml
+# agent worktrees, transcripts and logs of local runs
+runs/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

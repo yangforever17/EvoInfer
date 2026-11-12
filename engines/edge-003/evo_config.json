@@ -1,0 +1,7 @@
+{
+  "max_model_len": 8192,
+  "num_speculative_tokens": 3,
+  "gpu_memory_utilization": 0.9,
+  "max_num_seqs": 1,
+  "max_num_batched_tokens": 8192
+}

@@ -1,0 +1,47 @@
+# EvoInfer configuration. Copy to evoinfer.toml and edit; every key is optional except [models] qwen3_5.
+# `python3 orchestrator.py doctor` checks it. Details: docs/configuration.md
+
+[host]
+# "local": agents and GPUs on this machine (the default).
+# "ssh":   agents run here, GPUs on another machine reached with `ssh <ssh_host>` (key-based login, no password prompt).
+mode = "local"
+# ssh_host = "gpu-box"              # an alias from ~/.ssh/config, or user@host
+# ssh_config = "~/.ssh/config"      # optional, passed to ssh with -F
+home = "~/.evoinfer"                # state on the GPU host: engine archive, eval slots, records, judge engine
+# python = "/opt/conda/envs/evo/bin/python"   # default: <home>/venv/bin/python (scripts/setup_gpu_host.sh)
+
+[gpus]
+pool = [0]                          # GPU indices EvoInfer may use; one agent per GPU per round in `evolve`
+need_gb = 74                        # free memory an evaluation needs (Qwen3.5-35B-A3B BF16 + KV cache)
+max_wait_min = 30                   # shared machine: give up on a busy GPU after this long
+reassign_after_min = 5              # move an unpaired evaluation to any idle pool GPU after this long
+
+[models]                            # checkpoint directories on the GPU host
+qwen3_5 = "/models/Qwen3.5-35B-A3B"
+# qwen3_5_int4 = "/models/Qwen3.5-35B-A3B-int4"           # edge scenario (python -m evo.quantize_int4)
+# qwen3_5_int4_ref = "/models/Qwen3.5-35B-A3B-int4-ref"   # edge scenario: the judge's reference
+# olmoe = "/models/OLMoE-1B-7B-0125-Instruct"
+# gemma4 = "/models/gemma-4-26B-A4B-it"
+
+[agents]
+codex_bin = "codex"                 # Codex CLI, logged in (`codex login`)
+# codex_model = ""                  # empty: the CLI's default
+claude_bin = "claude"               # Claude Code, logged in
+# claude_model = ""                 # empty: the CLI's default
+
+# Extra policies (--policy <name>): Claude Code driving another model through an Anthropic-compatible endpoint.
+# The endpoint URL and key are read from the environment variables named here - never put keys in this file.
+# [policies.qwen]
+# cli = "claude"
+# model = "qwen3.8-max"
+# small_model = "qwen3.8-flash"     # Claude Code's background model
+# base_url_env = "QWEN_ANTHROPIC_BASE"
+# api_key_env = "QWEN_API_KEY"
+# proxy_env = ""                    # optional: name of a variable holding an HTTPS proxy for the CLI
+#
+# [policies.glm]
+# cli = "claude"
+# model = "glm-5.3"
+# small_model = "qwen3.8-flash"
+# base_url_env = "QWEN_ANTHROPIC_BASE"
+# api_key_env = "QWEN_API_KEY"

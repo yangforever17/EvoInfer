@@ -1,0 +1,5 @@
+{
+  "max_model_len": 33792,
+  "num_speculative_tokens": 3,
+  "gpu_memory_utilization": 0.95
+}
