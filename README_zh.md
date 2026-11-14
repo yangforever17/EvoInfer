@@ -13,17 +13,17 @@
 
 [English](README.md)
 
-我们在 Qwen3.5-35B-A3B 上做了实验。这个模型混合了门控 DeltaNet 与门控注意力，用 256 专家的 MoE，并带 MTP 投机解码。在单块 A100 上，约 20 小时的智能体时间把这个模型在 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 里的朴素移植版，从 **17.0 提高到 297.5 解码 tok/s**，端到端吞吐达到 **默认配置 vLLM 的 1.73–1.85 倍**。每个版本都逐 token 地与冻结的参考实现比对过。
+我们在 Qwen3.5-35B-A3B 上做了实验。这个模型混合了门控 DeltaNet 与门控注意力，用 256 专家的 MoE，并带 MTP 投机解码。在单块 A100 上，约 20 小时的智能体时间把这个模型在 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 里的朴素移植版，从 **17.0 提高到 297.5 解码 tok/s**，端到端吞吐达到 **vLLM 0.30 的 1.73–1.85 倍**。每个版本都逐 token 地与冻结的参考实现比对过。
 
 | | 结果 |
 |---|---|
-| 主线（20 智能体小时，Codex） | 解码 17.0 → 297.5 tok/s（17.5×）；端到端为默认 vLLM 的 1.73× / 1.85×；15 个版本中 7 个来自重组 |
-| 长上下文谱系（8K–31K 提示） | 通用引擎相对默认 vLLM 的优势降到 1.02×；进化两代（改动 34 行）后恢复到 1.60× |
-| 端侧谱系（32 GB 显卡，4 比特专家） | 在同一份权重上为默认 vLLM 的 1.61× / 1.79× |
+| 主线（20 智能体小时，Codex） | 解码 17.0 → 297.5 tok/s（17.5×）；端到端为 vLLM 0.30 的 1.73× / 1.85×；15 个版本中 7 个来自重组 |
+| 长上下文谱系（8K–31K 提示） | 通用引擎相对 vLLM 0.30 的优势降到 1.02×；进化两代（改动 34 行）后恢复到 1.60× |
+| 端侧谱系（32 GB 显卡，4 比特专家） | 在同一份权重上为 vLLM 0.30 的 1.61× / 1.79× |
 | 同一 harness 换策略模型（3 轮 × 2 智能体） | Codex 6.77×（3 次均值），Qwen3.8-Max 6.43×，GLM-5.3 4.31×，DeepSeek-V4-Pro 1.52× |
 | 换目标模型、换种子引擎 | OLMoE-1B-7B 2.24×，Gemma 4 26B-A4B 9.12×，mini-sglang 种子 1.82× |
 
-进化出的引擎在 [`engines/`](engines/) 里，可以直接用 `orchestrator.py eval` 测。
+vLLM 0.30 使用默认配置，具体设置见 [experiments/README.md](experiments/README.md)。进化出的引擎在 [`engines/`](engines/) 里，可以直接用 `orchestrator.py eval` 测。
 
 ## 工作方式
 
@@ -47,9 +47,39 @@
 需要：
 
 - **GPU 机器**：Linux，一块 80 GB 显卡（A100 / H100，用于 BF16 的 Qwen3.5-35B-A3B），CUDA 13，Python 3.12。
-- **智能体一侧**：Python ≥ 3.11、git、rsync，以及任一智能体 CLI：已登录的 [Codex CLI](https://github.com/openai/codex) 或 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)，或者 DeepSeek Harness（`npm i -g @deepseek-ai/dsh`，Node ≥ 24.9，并设置 `DEEPSEEK_API_KEY`）。
+- **智能体一侧**：Python ≥ 3.11、git、rsync，以及任一智能体 CLI（见第 1 步）。
 
 两侧可以是同一台机器（默认），也可以通过 SSH 连接两台机器。
+
+### 1. 安装智能体 CLI，并让它能访问模型
+
+智能体 CLI 是动手改引擎的程序，它背后的大模型叫*策略模型*。在智能体一侧任选一个安装：
+
+```bash
+# 方案 A：Codex CLI（默认，对应 --agent codex）
+npm i -g @openai/codex
+codex login                                   # 登录一次，EvoInfer 直接复用这个登录
+
+# 方案 B：Claude Code（对应 --agent claude）
+curl -fsSL https://claude.ai/install.sh | bash
+claude                                        # 首次启动时登录，然后退出；EvoInfer 直接复用这个登录
+
+# 方案 C：DeepSeek Harness（对应 --agent dsh），需要 Node.js >= 24.9
+npm i -g @deepseek-ai/dsh
+export DEEPSEEK_API_KEY=<你的密钥>             # 每次运行时从环境变量读取
+```
+
+内置的三种智能体只需要上面这些，不用再配置 LLM API：
+
+| `--agent` | 背后的 LLM API | 如何获得访问权限 | 模型 |
+|---|---|---|---|
+| `codex`（默认） | OpenAI | CLI 自己的登录 | CLI 的默认模型，或 `[agents] codex_model` |
+| `claude` | Anthropic | CLI 自己的登录 | CLI 的默认模型，或 `[agents] claude_model` |
+| `dsh` | DeepSeek 官方 API | `$DEEPSEEK_API_KEY` | `[agents] dsh_model`（`deepseek-v4-pro`） |
+
+想换成别的模型或自己的 API 端点，见第 4 步。
+
+### 2. 安装 EvoInfer
 
 ```bash
 git clone <本仓库> evoinfer && cd evoinfer
@@ -59,7 +89,9 @@ python3 orchestrator.py doctor                # 检查全部依赖，并告诉�
 python3 orchestrator.py setup                 # 引擎存档、判官引擎、提示集
 ```
 
-先测一下论文里的结果：
+### 3. 运行
+
+先测一下论文里的结果（这一步不需要智能体，也不需要 LLM API）：
 
 ```bash
 python3 orchestrator.py eval engines/evo-015 --gpu 0      # 完整评测 + 判官，约 10 分钟
@@ -73,11 +105,41 @@ python3 orchestrator.py evolve --rounds 3 --gpus 0,1                    # 每轮
 python3 orchestrator.py status                                          # 当前最优版本和全部实验记录
 ```
 
-`evolve` 默认用 Codex。`--agent claude` 改用 Claude Code，`--agent dsh` 改用 DeepSeek Harness；`--policy <名字>` 使用配置文件里定义的策略。
+`evolve` 默认用 Codex。加 `--agent claude` 改用 Claude Code，加 `--agent dsh` 改用 DeepSeek Harness。
 
 - **用时**：一轮（两个 75 分钟的 episode 加整合）约 1.5–2 小时。
 - **token**：一个 episode 读 3–5 M 输入 token，大部分是缓存。
 - **记录**：智能体的完整对话在 `runs/<episode>/`；所有评测、判定和存档在 GPU 机器上的 EvoInfer 目录里（`~/.evoinfer/records`）。
+
+### 4. 换用其他模型或 API 端点（可选）
+
+一个*策略*就是一个智能体 CLI 加上它调用的模型。在 `evoinfer.toml` 里加一个策略，就能让智能体 CLI 连到任何兼容的端点。配置文件里只写环境变量的*名字*，端点地址和密钥留在你的 shell 里：
+
+```toml
+# Claude Code 连接一个兼容 Anthropic 接口的端点
+[policies.qwen]
+cli = "claude"
+model = "qwen3.8-max"
+small_model = "qwen3.8-flash"            # Claude Code 的后台小模型
+base_url_env = "QWEN_ANTHROPIC_BASE"     # 存放端点地址的环境变量名
+api_key_env = "QWEN_API_KEY"             # 存放密钥的环境变量名
+
+# DeepSeek Harness 连接一个兼容 OpenAI 接口的端点
+[policies.dsh-qwen]
+cli = "dsh"
+api = "openai"                           # 默认是 "deepseek"，即 DeepSeek 自己的 API
+model = "qwen3.8-max"
+base_url_env = "QWEN_OPENAI_BASE"        # 例如 https://host/v1
+api_key_env = "QWEN_API_KEY"
+```
+
+```bash
+export QWEN_ANTHROPIC_BASE=https://<你的端点>
+export QWEN_API_KEY=<你的密钥>
+python3 orchestrator.py --policy qwen evolve --rounds 3 --gpus 0,1     # --policy 要写在子命令前面
+```
+
+密钥只从环境变量读取，不会写进配置文件、记录或日志。上下文窗口、代理、token 上限等全部选项见 [docs/configuration.md](docs/configuration.md)。
 
 ## 仓库结构
 

@@ -13,17 +13,18 @@ with them.
 
 On Qwen3.5-35B-A3B (hybrid Gated DeltaNet + gated attention, 256-expert MoE, MTP speculative decoding) on one A100,
 about 20 agent-hours took a naive port of the model into [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) from
-**17.0 to 297.5 decode tok/s**, with end-to-end throughput **1.73-1.85x that of vLLM's default configuration**. Every
+**17.0 to 297.5 decode tok/s**, with end-to-end throughput **1.73-1.85x that of vLLM 0.30**. Every
 version is checked token by token against a frozen reference implementation.
 
 | | Result |
 |---|---|
-| Main line (20 agent-hours, Codex) | decode 17.0 → 297.5 tok/s (17.5x); end-to-end 1.73x / 1.85x default vLLM; 7 of 15 versions came from recombination |
-| Long-context lineage (8K-31K prompts) | the general engine's lead over default vLLM drops to 1.02x; two generations (34 changed lines) restore it to 1.60x |
-| Edge lineage (32 GB GPU, 4-bit experts) | 1.61x / 1.79x default vLLM on the same weights |
+| Main line (20 agent-hours, Codex) | decode 17.0 → 297.5 tok/s (17.5x); end-to-end 1.73x / 1.85x vLLM 0.30; 7 of 15 versions came from recombination |
+| Long-context lineage (8K-31K prompts) | the general engine's lead over vLLM 0.30 drops to 1.02x; two generations (34 changed lines) restore it to 1.60x |
+| Edge lineage (32 GB GPU, 4-bit experts) | 1.61x / 1.79x vLLM 0.30 on the same weights |
 | Same harness, other policy models (3 rounds × 2 agents) | Codex 6.77x (mean of 3 runs), Qwen3.8-Max 6.43x, GLM-5.3 4.31x, DeepSeek-V4-Pro 1.52x |
 | Other target models, other seed engine | OLMoE-1B-7B 2.24x, Gemma 4 26B-A4B 9.12x, mini-sglang seed 1.82x |
 
+vLLM 0.30 runs in its default configuration; [experiments/README.md](experiments/README.md) describes the setup.
 The evolved engines ship in [`engines/`](engines/) and can be benchmarked directly (`orchestrator.py eval`).
 
 ## How it works
@@ -67,11 +68,40 @@ Details: [docs/architecture.md](docs/architecture.md).
 Requirements:
 
 - **GPU host:** Linux with an 80 GB GPU (A100/H100) for Qwen3.5-35B-A3B in BF16, CUDA 13 and Python 3.12.
-- **Agent side:** Python ≥ 3.11, git, rsync, and one agent CLI: the [Codex CLI](https://github.com/openai/codex) or
-  [Claude Code](https://docs.anthropic.com/en/docs/claude-code), logged in, or DeepSeek Harness
-  (`npm i -g @deepseek-ai/dsh`, Node ≥ 24.9) with `DEEPSEEK_API_KEY` set.
+- **Agent side:** Python ≥ 3.11, git, rsync, and one agent CLI (step 1).
 
 The agent side and the GPU host can be one machine (default) or two machines connected over SSH.
+
+### 1. Install an agent CLI and give it model access
+
+The agent CLI is the program that edits the engine; the LLM behind it is the *policy model*. Install one of the three
+on the agent side:
+
+```bash
+# Option A: Codex CLI (the default, `--agent codex`)
+npm i -g @openai/codex
+codex login                                   # sign in once; EvoInfer reuses this login
+
+# Option B: Claude Code (`--agent claude`)
+curl -fsSL https://claude.ai/install.sh | bash
+claude                                        # sign in on the first start, then exit; EvoInfer reuses this login
+
+# Option C: DeepSeek Harness (`--agent dsh`), needs Node.js >= 24.9
+npm i -g @deepseek-ai/dsh
+export DEEPSEEK_API_KEY=<your key>            # read from the environment on every run
+```
+
+That is all the LLM API configuration the built-in agents need:
+
+| `--agent` | LLM API behind it | How it gets access | Model |
+|---|---|---|---|
+| `codex` (default) | OpenAI | the CLI's own login | the CLI's default, or `[agents] codex_model` |
+| `claude` | Anthropic | the CLI's own login | the CLI's default, or `[agents] claude_model` |
+| `dsh` | DeepSeek's official API | `$DEEPSEEK_API_KEY` | `[agents] dsh_model` (`deepseek-v4-pro`) |
+
+To drive the agents with another model or your own endpoint, see step 4.
+
+### 2. Set up EvoInfer
 
 ```bash
 git clone <this repo> evoinfer && cd evoinfer
@@ -81,7 +111,9 @@ python3 orchestrator.py doctor                # checks everything and says how t
 python3 orchestrator.py setup                 # engine archive, judge engine, prompt sets
 ```
 
-Look at a result of the paper before evolving anything:
+### 3. Run
+
+Look at a result of the paper before evolving anything (this needs no agent and no LLM API):
 
 ```bash
 python3 orchestrator.py eval engines/evo-015 --gpu 0      # full benchmark + judge, ~10 min
@@ -95,11 +127,42 @@ python3 orchestrator.py evolve --rounds 3 --gpus 0,1                    # per ro
 python3 orchestrator.py status                                          # best version and every experiment
 ```
 
-`evolve` uses Codex by default (`--agent claude` for Claude Code, `--agent dsh` for DeepSeek Harness, `--policy <name>`
-for a policy from the config). One
+`evolve` uses Codex by default; add `--agent claude` for Claude Code or `--agent dsh` for DeepSeek Harness. One
 round of two 75-minute episodes plus integration takes about 1.5-2 hours. An episode reads 3-5 M input tokens, mostly
 cached. Every agent transcript is kept under `runs/<episode>/`; every evaluation, verdict and archive is kept under the
 EvoInfer home on the GPU host (`~/.evoinfer/records`).
+
+### 4. Use another model or API endpoint (optional)
+
+A *policy* is an agent CLI plus the model it talks to. Add one to `evoinfer.toml` to point an agent CLI at any
+compatible endpoint. The file holds only the *names* of environment variables; the URL and the key stay in your shell:
+
+```toml
+# Claude Code against an Anthropic-compatible endpoint
+[policies.qwen]
+cli = "claude"
+model = "qwen3.8-max"
+small_model = "qwen3.8-flash"            # Claude Code's background model
+base_url_env = "QWEN_ANTHROPIC_BASE"     # name of the variable that holds the endpoint URL
+api_key_env = "QWEN_API_KEY"             # name of the variable that holds the key
+
+# DeepSeek Harness against an OpenAI-compatible endpoint
+[policies.dsh-qwen]
+cli = "dsh"
+api = "openai"                           # "deepseek" (default) for DeepSeek's own API
+model = "qwen3.8-max"
+base_url_env = "QWEN_OPENAI_BASE"        # e.g. https://host/v1
+api_key_env = "QWEN_API_KEY"
+```
+
+```bash
+export QWEN_ANTHROPIC_BASE=https://<your endpoint>
+export QWEN_API_KEY=<your key>
+python3 orchestrator.py --policy qwen evolve --rounds 3 --gpus 0,1     # --policy goes before the subcommand
+```
+
+Keys are read only from the environment and are never written to the config, the records or the logs. Every option
+(context window, proxy, token limits) is in [docs/configuration.md](docs/configuration.md).
 
 ## Repository layout
 
